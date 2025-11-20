@@ -1,2 +1,33 @@
 # perf_wrapper
-learn perf_events
+
+Minimal C++ helper around perf_event_open that profiles an existing PID or a
+spawned command with user-selected counters.
+
+
+## Build
+
+    cmake -S . -B build
+    cmake --build build
+
+
+## Usage
+
+    ./perf_wrapper [-p PID] [-d SECONDS] [-c COUNTERS] [-app COMMAND ...]
+
+- -p monitor an existing process (default: wrapper PID).
+- -d stop after the given number of seconds; otherwise wait for the target.
+- -c comma-separated counters using sw-* / hw-* names (see -h for list).
+- -app executes and monitors the provided program.
+
+
+Example:
+
+    ./perf_wrapper -d 5 -c sw-cpu-clock,hw-cpu-cycles -app ./my_binary
+
+
+## Features
+
+- Prints basic /proc process info before sampling.
+- Supports multiple counters with explicit sw-/hw- prefixes.
+- Handles child synchronization, optional timeouts, and formatted output.
+
