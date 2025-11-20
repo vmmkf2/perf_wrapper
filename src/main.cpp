@@ -12,6 +12,17 @@
 #include <string>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+#include <cstdint>
+
+struct CounterConfig
+{
+    std::string name;
+    uint32_t type;
+    uint64_t config;
+};
 
 struct MonitorOptions
 {
@@ -19,6 +30,7 @@ struct MonitorOptions
     int durationSeconds = 0;             // Optional duration for sampling existing processes
     bool hasDuration = false;            // Whether duration was explicitly provided
     std::vector<std::string> appCommand; // Command to spawn under measurement
+    std::vector<CounterConfig> counters = {{"cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK}};
 };
 
 enum class ParseResult
@@ -27,6 +39,78 @@ enum class ParseResult
     ShowHelp,
     Failure
 };
+
+struct CounterNameEntry
+{
+    const char *name;
+    uint32_t type;
+    uint64_t config;
+};
+
+static const CounterNameEntry kSupportedCounters[] = {
+    // Software counters
+    {"cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK},
+    {"task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK},
+    {"page-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS},
+    {"page-faults-min", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN},
+    {"page-faults-maj", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ},
+    {"context-switches", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES},
+    {"cpu-migrations", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_MIGRATIONS},
+    {"alignment-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_ALIGNMENT_FAULTS},
+    {"emulation-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_EMULATION_FAULTS},
+    {"dummy", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_DUMMY},
+    {"bpf-output", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_BPF_OUTPUT},
+    // Hardware counters
+    {"cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES},
+    {"instructions", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS},
+    {"cache-references", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_REFERENCES},
+    {"cache-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES},
+    {"branch-instructions", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS},
+    {"branch-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES},
+    {"bus-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BUS_CYCLES},
+    {"stalled-cycles-frontend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND},
+    {"stalled-cycles-backend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND},
+    {"ref-cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES}};
+
+std::string trim_copy(const std::string &value)
+{
+    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch)
+                                        { return std::isspace(ch); });
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch)
+                                      { return std::isspace(ch); })
+                         .base();
+    if (begin >= end)
+    {
+        return "";
+    }
+    return std::string(begin, end);
+}
+
+std::string to_lower_copy(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch)
+                   { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+bool add_counter_by_name(const std::string &name, MonitorOptions &options)
+{
+    const std::string normalized = to_lower_copy(trim_copy(name));
+    if (normalized.empty())
+    {
+        return false;
+    }
+
+    for (const auto &entry : kSupportedCounters)
+    {
+        if (normalized == entry.name)
+        {
+            options.counters.push_back({entry.name, entry.type, entry.config});
+            return true;
+        }
+    }
+    return false;
+}
 
 static long perf_event_open(struct perf_event_attr *attr,
                             pid_t pid, int cpu, int group_fd,
@@ -37,12 +121,39 @@ static long perf_event_open(struct perf_event_attr *attr,
     return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
 }
 
+void print_counter_list(const char *label, uint32_t type)
+{
+    std::cerr << "  " << label << ": ";
+    bool first = true;
+    for (const auto &entry : kSupportedCounters)
+    {
+        if (entry.type != type)
+        {
+            continue;
+        }
+        if (!first)
+        {
+            std::cerr << ", ";
+        }
+        std::cerr << entry.name;
+        first = false;
+    }
+    if (first)
+    {
+        std::cerr << "(none)";
+    }
+    std::cerr << std::endl;
+}
+
 void print_usage(const char *prog_name)
 {
-    std::cerr << "Usage: " << prog_name << " [-p PID] [-d DURATION] [-app COMMAND [ARGS...]]" << std::endl;
-    std::cerr << "  -p PID       Process ID to monitor (default: current process)" << std::endl;
-    std::cerr << "  -d DURATION  Duration in seconds to monitor (default: run test workload)" << std::endl;
-    std::cerr << "  -app COMMAND Execute and monitor COMMAND with its arguments" << std::endl;
+    std::cerr << "Usage: " << prog_name << " [-p PID] [-d DURATION] [-c COUNTERS] [-app COMMAND [ARGS...]]" << std::endl;
+    std::cerr << "  -p PID        Process ID to monitor (default: current process)" << std::endl;
+    std::cerr << "  -d DURATION   Duration in seconds to monitor (default: run test workload)" << std::endl;
+    std::cerr << "  -c COUNTERS   Comma-separated perf counter names (software or hardware)" << std::endl;
+    std::cerr << "  -app COMMAND  Execute and monitor COMMAND with its arguments" << std::endl;
+    print_counter_list("Software counters", PERF_TYPE_SOFTWARE);
+    print_counter_list("Hardware counters", PERF_TYPE_HARDWARE);
 }
 
 void print_process_info(pid_t pid)
@@ -154,6 +265,37 @@ ParseResult parse_arguments(int argc, char *argv[], MonitorOptions &options)
                 return ParseResult::Failure;
             }
         }
+        else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--counters") == 0)
+        {
+            if (i + 1 < argc)
+            {
+                options.counters.clear();
+                bool all_valid = true;
+                std::stringstream ss(argv[++i]);
+                std::string token;
+                while (std::getline(ss, token, ','))
+                {
+                    if (!add_counter_by_name(token, options))
+                    {
+                        std::cerr << "Error: unknown software counter '" << token << "'" << std::endl;
+                        all_valid = false;
+                        break;
+                    }
+                }
+
+                if (!all_valid || options.counters.empty())
+                {
+                    print_usage(argv[0]);
+                    return ParseResult::Failure;
+                }
+            }
+            else
+            {
+                std::cerr << "Error: -c requires a comma-separated counter list" << std::endl;
+                print_usage(argv[0]);
+                return ParseResult::Failure;
+            }
+        }
         else if (strcmp(argv[i], "-app") == 0)
         {
             if (i + 1 < argc)
@@ -179,6 +321,11 @@ ParseResult parse_arguments(int argc, char *argv[], MonitorOptions &options)
             print_usage(argv[0]);
             return ParseResult::Failure;
         }
+    }
+
+    if (options.counters.empty())
+    {
+        options.counters.push_back({"cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
     }
 
     return ParseResult::Success;
@@ -257,6 +404,22 @@ void terminate_child_process(pid_t child_pid)
     }
 }
 
+std::string format_with_commas(long long value)
+{
+    std::string digits = std::to_string(value);
+    const std::size_t prefix = digits[0] == '-' ? 1 : 0;
+
+    if (digits.size() - prefix > 3)
+    {
+        for (int i = static_cast<int>(digits.size()) - 3; i > static_cast<int>(prefix); i -= 3)
+        {
+            digits.insert(static_cast<std::size_t>(i), ",");
+        }
+    }
+
+    return digits;
+}
+
 bool launch_target_command(const MonitorOptions &options, pid_t &child_pid)
 {
     if (options.appCommand.empty())
@@ -303,55 +466,100 @@ struct PerfHandle
 {
     perf_event_attr attr{};
     int fd = -1;
+    std::string label;
 };
 
-PerfHandle setup_perf_event(pid_t target_pid)
+bool setup_perf_events(pid_t target_pid, const std::vector<CounterConfig> &counters, std::vector<PerfHandle> &handles)
 {
-    PerfHandle handle;
-    handle.attr.type = PERF_TYPE_SOFTWARE;
-    handle.attr.size = sizeof(perf_event_attr);
-    handle.attr.config = PERF_COUNT_SW_CPU_CLOCK;
-    handle.attr.disabled = 1;
-    handle.attr.exclude_kernel = 1;
-    handle.attr.exclude_hv = 1;
-    handle.attr.inherit = 1;
+    handles.clear();
+    handles.reserve(counters.size());
 
-    handle.fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
-    return handle;
-}
+    for (const CounterConfig &counter : counters)
+    {
+        PerfHandle handle;
+        handle.attr.type = counter.type;
+        handle.attr.size = sizeof(perf_event_attr);
+        handle.attr.config = counter.config;
+        handle.attr.disabled = 1;
+        handle.attr.exclude_kernel = 1;
+        handle.attr.exclude_hv = 1;
+        handle.attr.inherit = 1;
+        handle.label = counter.name;
 
-bool start_perf_counter(const PerfHandle &handle)
-{
-    if (handle.fd < 0)
-    {
-        return false;
+        handle.fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
+        if (handle.fd < 0)
+        {
+            perror("perf_event_open");
+            for (PerfHandle &opened : handles)
+            {
+                if (opened.fd >= 0)
+                {
+                    close(opened.fd);
+                }
+            }
+            handles.clear();
+            return false;
+        }
+
+        handles.push_back(std::move(handle));
     }
-    if (ioctl(handle.fd, PERF_EVENT_IOC_RESET, 0) == -1)
-    {
-        perror("ioctl reset");
-        return false;
-    }
-    if (ioctl(handle.fd, PERF_EVENT_IOC_ENABLE, 0) == -1)
-    {
-        perror("ioctl enable");
-        return false;
-    }
+
     return true;
 }
 
-long long stop_and_read_counter(const PerfHandle &handle)
+bool start_perf_counters(const std::vector<PerfHandle> &handles)
 {
-    if (ioctl(handle.fd, PERF_EVENT_IOC_DISABLE, 0) == -1)
+    bool success = true;
+    for (const PerfHandle &handle : handles)
     {
-        perror("ioctl disable");
+        if (ioctl(handle.fd, PERF_EVENT_IOC_RESET, 0) == -1)
+        {
+            perror("ioctl reset");
+            success = false;
+        }
+        if (ioctl(handle.fd, PERF_EVENT_IOC_ENABLE, 0) == -1)
+        {
+            perror("ioctl enable");
+            success = false;
+        }
+    }
+    return success;
+}
+
+std::vector<std::pair<std::string, long long>> stop_and_read_counters(const std::vector<PerfHandle> &handles)
+{
+    std::vector<std::pair<std::string, long long>> results;
+    results.reserve(handles.size());
+
+    for (const PerfHandle &handle : handles)
+    {
+        if (ioctl(handle.fd, PERF_EVENT_IOC_DISABLE, 0) == -1)
+        {
+            perror("ioctl disable");
+        }
+
+        long long count = 0;
+        if (read(handle.fd, &count, sizeof(count)) < 0)
+        {
+            perror("read");
+        }
+        results.push_back({handle.label, count});
     }
 
-    long long count = 0;
-    if (read(handle.fd, &count, sizeof(count)) < 0)
+    return results;
+}
+
+void close_perf_handles(std::vector<PerfHandle> &handles)
+{
+    for (PerfHandle &handle : handles)
     {
-        perror("read");
+        if (handle.fd >= 0)
+        {
+            close(handle.fd);
+            handle.fd = -1;
+        }
     }
-    return count;
+    handles.clear();
 }
 
 int main(int argc, char *argv[])
@@ -395,23 +603,22 @@ int main(int argc, char *argv[])
     const pid_t effective_pid = options.targetPid == 0 ? getpid() : options.targetPid;
     print_process_info(effective_pid);
 
-    PerfHandle perf = setup_perf_event(effective_pid);
-    if (perf.fd < 0)
+    std::vector<PerfHandle> perf_handles;
+    if (!setup_perf_events(effective_pid, options.counters, perf_handles))
     {
-        perror("perf_event_open");
         if (child_pid > 0)
         {
-            kill(child_pid, SIGKILL);
+            terminate_child_process(child_pid);
         }
         return 1;
     }
 
-    if (!start_perf_counter(perf))
+    if (!start_perf_counters(perf_handles))
     {
-        close(perf.fd);
+        close_perf_handles(perf_handles);
         if (child_pid > 0)
         {
-            kill(child_pid, SIGKILL);
+            terminate_child_process(child_pid);
         }
         return 1;
     }
@@ -468,9 +675,13 @@ int main(int argc, char *argv[])
         std::cout << "No duration specified; capturing immediate snapshot." << std::endl;
     }
 
-    const long long instructions = stop_and_read_counter(perf);
-    close(perf.fd);
+    const auto counter_results = stop_and_read_counters(perf_handles);
+    close_perf_handles(perf_handles);
 
-    std::cout << "Instructions: " << instructions << std::endl;
+    std::cout << "\n=== Counter Results ===" << std::endl;
+    for (const auto &entry : counter_results)
+    {
+        std::cout << entry.first << ": " << format_with_commas(entry.second) << std::endl;
+    }
     return 0;
 }
