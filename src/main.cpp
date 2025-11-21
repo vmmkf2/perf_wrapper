@@ -16,6 +16,7 @@
 #include <cctype>
 #include <sstream>
 #include <cstdint>
+#include <CLI/CLI.hpp>
 
 struct CounterConfig
 {
@@ -31,13 +32,6 @@ struct MonitorOptions
     bool hasDuration = false;            // Whether duration was explicitly provided
     std::vector<std::string> appCommand; // Command to spawn under measurement
     std::vector<CounterConfig> counters = {{"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK}};
-};
-
-enum class ParseResult
-{
-    Success,
-    ShowHelp,
-    Failure
 };
 
 struct CounterNameEntry
@@ -71,6 +65,38 @@ static const CounterNameEntry kSupportedCounters[] = {
     {"hw-stalled-cycles-frontend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND},
     {"hw-stalled-cycles-backend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND},
     {"hw-ref-cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES}};
+
+std::string list_counters_by_type(uint32_t type)
+{
+    std::ostringstream oss;
+    bool first = true;
+    for (const auto &entry : kSupportedCounters)
+    {
+        if (entry.type != type)
+        {
+            continue;
+        }
+        if (!first)
+        {
+            oss << ", ";
+        }
+        oss << entry.name;
+        first = false;
+    }
+    if (first)
+    {
+        oss << "(none)";
+    }
+    return oss.str();
+}
+
+std::string build_counter_help_footer()
+{
+    std::ostringstream oss;
+    oss << "\nSoftware counters: " << list_counters_by_type(PERF_TYPE_SOFTWARE)
+        << "\nHardware counters: " << list_counters_by_type(PERF_TYPE_HARDWARE);
+    return oss.str();
+}
 
 std::string trim_copy(const std::string &value)
 {
@@ -119,41 +145,6 @@ static long perf_event_open(struct perf_event_attr *attr,
     // debug print of syscall parametrs
     std::cout << "perf_event_open called with pid=" << pid << ", cpu=" << cpu << ", group_fd=" << group_fd << ", flags=" << flags << std::endl;
     return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
-}
-
-void print_counter_list(const char *label, uint32_t type)
-{
-    std::cerr << "  " << label << ": ";
-    bool first = true;
-    for (const auto &entry : kSupportedCounters)
-    {
-        if (entry.type != type)
-        {
-            continue;
-        }
-        if (!first)
-        {
-            std::cerr << ", ";
-        }
-        std::cerr << entry.name;
-        first = false;
-    }
-    if (first)
-    {
-        std::cerr << "(none)";
-    }
-    std::cerr << std::endl;
-}
-
-void print_usage(const char *prog_name)
-{
-    std::cerr << "Usage: " << prog_name << " [-p PID] [-d DURATION] [-c COUNTERS] [-app COMMAND [ARGS...]]" << std::endl;
-    std::cerr << "  -p PID        Process ID to monitor (default: current process)" << std::endl;
-    std::cerr << "  -d DURATION   Duration in seconds to monitor (default: run test workload)" << std::endl;
-    std::cerr << "  -c COUNTERS   Comma-separated perf counter names (software or hardware)" << std::endl;
-    std::cerr << "  -app COMMAND  Execute and monitor COMMAND with its arguments" << std::endl;
-    print_counter_list("Software counters", PERF_TYPE_SOFTWARE);
-    print_counter_list("Hardware counters", PERF_TYPE_HARDWARE);
 }
 
 void print_process_info(pid_t pid)
@@ -226,109 +217,6 @@ void print_process_info(pid_t pid)
 
     std::cout << "===========================\n"
               << std::endl;
-}
-
-ParseResult parse_arguments(int argc, char *argv[], MonitorOptions &options)
-{
-    options = MonitorOptions{};
-    for (int i = 1; i < argc; i++)
-    {
-        if (strcmp(argv[i], "-p") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                options.targetPid = atoi(argv[++i]);
-            }
-            else
-            {
-                std::cerr << "Error: -p requires a PID argument" << std::endl;
-                print_usage(argv[0]);
-                return ParseResult::Failure;
-            }
-        }
-        else if (strcmp(argv[i], "-d") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                options.durationSeconds = atoi(argv[++i]);
-                options.hasDuration = true;
-                if (options.durationSeconds <= 0)
-                {
-                    std::cerr << "Error: duration must be positive" << std::endl;
-                    return ParseResult::Failure;
-                }
-            }
-            else
-            {
-                std::cerr << "Error: -d requires a duration argument" << std::endl;
-                print_usage(argv[0]);
-                return ParseResult::Failure;
-            }
-        }
-        else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--counters") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                options.counters.clear();
-                bool all_valid = true;
-                std::stringstream ss(argv[++i]);
-                std::string token;
-                while (std::getline(ss, token, ','))
-                {
-                    if (!add_counter_by_name(token, options))
-                    {
-                        std::cerr << "Error: unknown counter '" << token << "'" << std::endl;
-                        all_valid = false;
-                        break;
-                    }
-                }
-
-                if (!all_valid || options.counters.empty())
-                {
-                    print_usage(argv[0]);
-                    return ParseResult::Failure;
-                }
-            }
-            else
-            {
-                std::cerr << "Error: -c requires a comma-separated counter list" << std::endl;
-                print_usage(argv[0]);
-                return ParseResult::Failure;
-            }
-        }
-        else if (strcmp(argv[i], "-app") == 0)
-        {
-            if (i + 1 < argc)
-            {
-                options.appCommand.assign(argv + i + 1, argv + argc);
-                break; // Remaining args belong to the command
-            }
-            else
-            {
-                std::cerr << "Error: -app requires a command" << std::endl;
-                print_usage(argv[0]);
-                return ParseResult::Failure;
-            }
-        }
-        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
-        {
-            print_usage(argv[0]);
-            return ParseResult::ShowHelp;
-        }
-        else
-        {
-            std::cerr << "Error: unknown option " << argv[i] << std::endl;
-            print_usage(argv[0]);
-            return ParseResult::Failure;
-        }
-    }
-
-    if (options.counters.empty())
-    {
-        options.counters.push_back({"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
-    }
-
-    return ParseResult::Success;
 }
 
 std::vector<char *> build_exec_argv(const std::vector<std::string> &command)
@@ -469,6 +357,15 @@ struct PerfHandle
     std::string label;
 };
 
+struct CounterResult
+{
+    std::string label;
+    long long value = 0;
+    uint64_t time_enabled = 0;
+    uint64_t time_running = 0;
+    uint64_t id = 0;
+};
+
 bool setup_perf_events(pid_t target_pid, const std::vector<CounterConfig> &counters, std::vector<PerfHandle> &handles)
 {
     handles.clear();
@@ -484,6 +381,9 @@ bool setup_perf_events(pid_t target_pid, const std::vector<CounterConfig> &count
         handle.attr.exclude_kernel = 1;
         handle.attr.exclude_hv = 1;
         handle.attr.inherit = 1;
+        handle.attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED |
+                      PERF_FORMAT_TOTAL_TIME_RUNNING |
+                      PERF_FORMAT_ID;
         handle.label = counter.name;
 
         handle.fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
@@ -526,10 +426,18 @@ bool start_perf_counters(const std::vector<PerfHandle> &handles)
     return success;
 }
 
-std::vector<std::pair<std::string, long long>> stop_and_read_counters(const std::vector<PerfHandle> &handles)
+std::vector<CounterResult> stop_and_read_counters(const std::vector<PerfHandle> &handles)
 {
-    std::vector<std::pair<std::string, long long>> results;
+    std::vector<CounterResult> results;
     results.reserve(handles.size());
+
+    struct PerfReadValues
+    {
+        uint64_t value;
+        uint64_t time_enabled;
+        uint64_t time_running;
+        uint64_t id;
+    };
 
     for (const PerfHandle &handle : handles)
     {
@@ -538,12 +446,28 @@ std::vector<std::pair<std::string, long long>> stop_and_read_counters(const std:
             perror("ioctl disable");
         }
 
-        long long count = 0;
-        if (read(handle.fd, &count, sizeof(count)) < 0)
+        PerfReadValues values{};
+        const ssize_t bytes_read = read(handle.fd, &values, sizeof(values));
+        if (bytes_read < 0)
         {
             perror("read");
+            continue;
         }
-        results.push_back({handle.label, count});
+        if (static_cast<size_t>(bytes_read) != sizeof(values))
+        {
+            std::cerr << "Warning: unexpected perf read size for " << handle.label << std::endl;
+            continue;
+        }
+
+        long long adjusted_value = static_cast<long long>(values.value);
+        if (values.time_running > 0 && values.time_running != values.time_enabled)
+        {
+            const long double scale = static_cast<long double>(values.time_enabled) /
+                                      static_cast<long double>(values.time_running);
+            adjusted_value = static_cast<long long>(static_cast<long double>(values.value) * scale);
+        }
+
+        results.push_back({handle.label, adjusted_value, values.time_enabled, values.time_running, values.id});
     }
 
     return results;
@@ -565,14 +489,48 @@ void close_perf_handles(std::vector<PerfHandle> &handles)
 int main(int argc, char *argv[])
 {
     MonitorOptions options;
-    const ParseResult parse_result = parse_arguments(argc, argv, options);
-    if (parse_result == ParseResult::ShowHelp)
+    std::vector<std::string> counter_names;
+
+    CLI::App cli_app{"Minimal wrapper around perf_event_open"};
+    cli_app.footer(build_counter_help_footer());
+    cli_app.allow_extras(true);
+
+    cli_app.add_option("-p,--pid", options.targetPid, "Process ID to monitor (default: current process)");
+
+    auto duration_option = cli_app.add_option("-d,--duration", options.durationSeconds, "Duration in seconds to monitor");
+    duration_option->check(CLI::PositiveNumber);
+
+    auto counters_option = cli_app.add_option("-c,--counters", counter_names, "Comma-separated perf counter names (software or hardware)");
+    counters_option->delimiter(',');
+    counters_option->expected(-1);
+
+    CLI11_PARSE(cli_app, argc, argv);
+
+    options.appCommand = cli_app.remaining();
+
+    options.hasDuration = duration_option->count() > 0;
+
+    if (!counter_names.empty())
     {
-        return 0;
+        options.counters.clear();
+        for (const auto &name : counter_names)
+        {
+            if (!add_counter_by_name(name, options))
+            {
+                std::cerr << "Error: unknown counter '" << name << "'" << std::endl;
+                return 1;
+            }
+        }
+        if (options.counters.empty())
+        {
+            std::cerr << "Error: no counters specified" << std::endl;
+            return 1;
+        }
     }
-    if (parse_result == ParseResult::Failure)
+
+    if (options.counters.empty())
     {
-        return 1;
+        options.counters.push_back({"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
     }
 
     pid_t child_pid = -1;
@@ -679,9 +637,15 @@ int main(int argc, char *argv[])
     close_perf_handles(perf_handles);
 
     std::cout << "\n=== Counter Results ===" << std::endl;
-    for (const auto &entry : counter_results)
+    for (const auto &result : counter_results)
     {
-        std::cout << entry.first << ": " << format_with_commas(entry.second) << std::endl;
+        std::cout << result.label << ": " << format_with_commas(result.value);
+        if (result.time_running > 0 && result.time_running != result.time_enabled)
+        {
+            std::cout << " (enabled=" << result.time_enabled
+                      << ", running=" << result.time_running << ")";
+        }
+        std::cout << std::endl;
     }
     return 0;
 }
