@@ -8,22 +8,14 @@
 #include <iostream>
 #include <cstdlib>
 #include <vector>
-#include <fstream>
 #include <string>
 #include <chrono>
 #include <thread>
-#include <algorithm>
-#include <cctype>
-#include <sstream>
 #include <cstdint>
 #include <CLI/CLI.hpp>
 
-struct CounterConfig
-{
-    std::string name;
-    uint32_t type;
-    uint64_t config;
-};
+#include "counters.h"
+#include "helper.h"
 
 struct MonitorOptions
 {
@@ -34,110 +26,6 @@ struct MonitorOptions
     std::vector<CounterConfig> counters = {{"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK}};
 };
 
-struct CounterNameEntry
-{
-    const char *name;
-    uint32_t type;
-    uint64_t config;
-};
-
-static const CounterNameEntry kSupportedCounters[] = {
-    // Software counters
-    {"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK},
-    {"sw-task-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_TASK_CLOCK},
-    {"sw-page-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS},
-    {"sw-page-faults-min", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN},
-    {"sw-page-faults-maj", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MAJ},
-    {"sw-context-switches", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CONTEXT_SWITCHES},
-    {"sw-cpu-migrations", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_MIGRATIONS},
-    {"sw-alignment-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_ALIGNMENT_FAULTS},
-    {"sw-emulation-faults", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_EMULATION_FAULTS},
-    {"sw-dummy", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_DUMMY},
-    {"sw-bpf-output", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_BPF_OUTPUT},
-    // Hardware counters
-    {"hw-cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES},
-    {"hw-instructions", PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS},
-    {"hw-cache-references", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_REFERENCES},
-    {"hw-cache-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_CACHE_MISSES},
-    {"hw-branch-instructions", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_INSTRUCTIONS},
-    {"hw-branch-misses", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES},
-    {"hw-bus-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_BUS_CYCLES},
-    {"hw-stalled-cycles-frontend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND},
-    {"hw-stalled-cycles-backend", PERF_TYPE_HARDWARE, PERF_COUNT_HW_STALLED_CYCLES_BACKEND},
-    {"hw-ref-cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES}};
-
-std::string list_counters_by_type(uint32_t type)
-{
-    std::ostringstream oss;
-    bool first = true;
-    for (const auto &entry : kSupportedCounters)
-    {
-        if (entry.type != type)
-        {
-            continue;
-        }
-        if (!first)
-        {
-            oss << ", ";
-        }
-        oss << entry.name;
-        first = false;
-    }
-    if (first)
-    {
-        oss << "(none)";
-    }
-    return oss.str();
-}
-
-std::string build_counter_help_footer()
-{
-    std::ostringstream oss;
-    oss << "\nSoftware counters: " << list_counters_by_type(PERF_TYPE_SOFTWARE)
-        << "\nHardware counters: " << list_counters_by_type(PERF_TYPE_HARDWARE);
-    return oss.str();
-}
-
-std::string trim_copy(const std::string &value)
-{
-    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch)
-                                        { return std::isspace(ch); });
-    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch)
-                                      { return std::isspace(ch); })
-                         .base();
-    if (begin >= end)
-    {
-        return "";
-    }
-    return std::string(begin, end);
-}
-
-std::string to_lower_copy(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch)
-                   { return static_cast<char>(std::tolower(ch)); });
-    return value;
-}
-
-bool add_counter_by_name(const std::string &name, MonitorOptions &options)
-{
-    const std::string normalized = to_lower_copy(trim_copy(name));
-    if (normalized.empty())
-    {
-        return false;
-    }
-
-    for (const auto &entry : kSupportedCounters)
-    {
-        if (normalized == entry.name)
-        {
-            options.counters.push_back({entry.name, entry.type, entry.config});
-            return true;
-        }
-    }
-    return false;
-}
-
 static long perf_event_open(struct perf_event_attr *attr,
                             pid_t pid, int cpu, int group_fd,
                             unsigned long flags)
@@ -145,78 +33,6 @@ static long perf_event_open(struct perf_event_attr *attr,
     // debug print of syscall parametrs
     std::cout << "perf_event_open called with pid=" << pid << ", cpu=" << cpu << ", group_fd=" << group_fd << ", flags=" << flags << std::endl;
     return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
-}
-
-void print_process_info(pid_t pid)
-{
-    std::cout << "\n=== Process Information ===" << std::endl;
-    std::cout << "PID: " << pid << std::endl;
-
-    // Read /proc/[pid]/status for process information
-    std::string status_path = "/proc/" + std::to_string(pid) + "/status";
-    std::ifstream status_file(status_path);
-
-    if (status_file.is_open())
-    {
-        std::string line;
-        while (std::getline(status_file, line))
-        {
-            // Extract relevant fields
-            if (line.find("Name:") == 0)
-            {
-                std::cout << "Process " << line.substr(5) << std::endl;
-            }
-            else if (line.find("State:") == 0)
-            {
-                std::cout << "" << line.substr(6) << std::endl;
-            }
-            else if (line.find("PPid:") == 0)
-            {
-                std::cout << "Parent PID: " << line.substr(5) << std::endl;
-            }
-            else if (line.find("Threads:") == 0)
-            {
-                std::cout << "" << line.substr(8) << std::endl;
-            }
-            else if (line.find("VmSize:") == 0)
-            {
-                std::cout << "Virtual Memory Size: " << line.substr(7) << std::endl;
-            }
-            else if (line.find("VmRSS:") == 0)
-            {
-                std::cout << "Resident Set Size: " << line.substr(6) << std::endl;
-            }
-        }
-        status_file.close();
-    }
-    else
-    {
-        std::cerr << "Warning: Could not read process information from /proc/" << pid << "/status" << std::endl;
-    }
-
-    // Read command line
-    std::string cmdline_path = "/proc/" + std::to_string(pid) + "/cmdline";
-    std::ifstream cmdline_file(cmdline_path);
-
-    if (cmdline_file.is_open())
-    {
-        std::string cmdline;
-        std::getline(cmdline_file, cmdline);
-        // Replace null bytes with spaces for display
-        for (char &c : cmdline)
-        {
-            if (c == '\0')
-                c = ' ';
-        }
-        if (!cmdline.empty())
-        {
-            std::cout << "Command: " << cmdline << std::endl;
-        }
-        cmdline_file.close();
-    }
-
-    std::cout << "===========================\n"
-              << std::endl;
 }
 
 std::vector<char *> build_exec_argv(const std::vector<std::string> &command)
@@ -290,22 +106,6 @@ void terminate_child_process(pid_t child_pid)
     {
         perror("kill");
     }
-}
-
-std::string format_with_commas(long long value)
-{
-    std::string digits = std::to_string(value);
-    const std::size_t prefix = digits[0] == '-' ? 1 : 0;
-
-    if (digits.size() - prefix > 3)
-    {
-        for (int i = static_cast<int>(digits.size()) - 3; i > static_cast<int>(prefix); i -= 3)
-        {
-            digits.insert(static_cast<std::size_t>(i), ",");
-        }
-    }
-
-    return digits;
 }
 
 bool launch_target_command(const MonitorOptions &options, pid_t &child_pid)
@@ -515,7 +315,7 @@ int main(int argc, char *argv[])
         options.counters.clear();
         for (const auto &name : counter_names)
         {
-            if (!add_counter_by_name(name, options))
+            if (!add_counter_by_name(name, options.counters))
             {
                 std::cerr << "Error: unknown counter '" << name << "'" << std::endl;
                 return 1;

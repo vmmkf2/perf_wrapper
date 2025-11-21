@@ -16,6 +16,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(CLI11)
 
 # Add the executable
-add_executable(perf_wrapper src/main.cpp)
+add_executable(perf_wrapper
+	src/main.cpp
+	src/helper.cpp
+	src/counters.cpp)
 
 target_link_libraries(perf_wrapper PRIVATE CLI11::CLI11)
