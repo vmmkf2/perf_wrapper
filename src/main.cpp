@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <linux/perf_event.h>
 #include <optional>
 #include <signal.h>
@@ -216,7 +217,12 @@ std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const
     handle.attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
     handle.label = counter.name;
 
-    handle.fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
+    const long fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
+    if (fd < std::numeric_limits<int>::min() || fd > std::numeric_limits<int>::max()) {
+      std::cerr << "perf_event_open returned unexpected fd value for " << counter.name << std::endl;
+      return std::nullopt;
+    }
+    handle.fd = static_cast<int>(fd);
     if (handle.fd < 0) {
       perror("perf_event_open");
       return std::nullopt;

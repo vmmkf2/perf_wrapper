@@ -33,10 +33,20 @@ add_executable(perf_wrapper
 
 target_link_libraries(perf_wrapper PRIVATE CLI11::CLI11)
 
+set(COMMON_WARNING_FLAGS)
+if (MSVC)
+	list(APPEND COMMON_WARNING_FLAGS /W4 /WX)
+else()
+	list(APPEND COMMON_WARNING_FLAGS -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
+endif()
+
+target_compile_options(perf_wrapper PRIVATE ${COMMON_WARNING_FLAGS})
+
 add_executable(perf_wrapper_tests
 	tests/perf_wrapper_integration_tests.cpp)
 
 target_link_libraries(perf_wrapper_tests PRIVATE doctest::doctest)
+target_compile_options(perf_wrapper_tests PRIVATE ${COMMON_WARNING_FLAGS})
 target_compile_definitions(perf_wrapper_tests PRIVATE PERF_WRAPPER_BINARY="$<TARGET_FILE:perf_wrapper>")
 add_dependencies(perf_wrapper_tests perf_wrapper)
 
