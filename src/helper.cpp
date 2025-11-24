@@ -4,6 +4,19 @@
 #include <iostream>
 #include <string>
 
+namespace
+{
+    std::string trim_leading(const std::string &value)
+    {
+        const auto pos = value.find_first_not_of(" \t");
+        if (pos == std::string::npos)
+        {
+            return "";
+        }
+        return value.substr(pos);
+    }
+} // namespace
+
 void print_process_info(pid_t pid)
 {
     std::cout << "\n=== Process Information ===" << std::endl;
@@ -19,27 +32,27 @@ void print_process_info(pid_t pid)
         {
             if (line.find("Name:") == 0)
             {
-                std::cout << "Process " << line.substr(5) << std::endl;
+                std::cout << "Name: " << trim_leading(line.substr(5)) << std::endl;
             }
             else if (line.find("State:") == 0)
             {
-                std::cout << "" << line.substr(6) << std::endl;
+                std::cout << "State: " << trim_leading(line.substr(6)) << std::endl;
             }
             else if (line.find("PPid:") == 0)
             {
-                std::cout << "Parent PID: " << line.substr(5) << std::endl;
+                std::cout << "Parent PID: " << trim_leading(line.substr(5)) << std::endl;
             }
             else if (line.find("Threads:") == 0)
             {
-                std::cout << "" << line.substr(8) << std::endl;
+                std::cout << "Threads: " << trim_leading(line.substr(8)) << std::endl;
             }
             else if (line.find("VmSize:") == 0)
             {
-                std::cout << "Virtual Memory Size: " << line.substr(7) << std::endl;
+                std::cout << "Virtual Memory Size: " << trim_leading(line.substr(7)) << std::endl;
             }
             else if (line.find("VmRSS:") == 0)
             {
-                std::cout << "Resident Set Size: " << line.substr(6) << std::endl;
+                std::cout << "Resident Set Size: " << trim_leading(line.substr(6)) << std::endl;
             }
         }
         status_file.close();

@@ -4,6 +4,7 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <cstdlib>
@@ -174,6 +175,7 @@ bool setup_perf_events(pid_t target_pid, const std::vector<CounterConfig> &count
     for (const CounterConfig &counter : counters)
     {
         PerfHandle handle;
+        memset(&handle.attr, 0, sizeof(handle.attr));
         handle.attr.type = counter.type;
         handle.attr.size = sizeof(perf_event_attr);
         handle.attr.config = counter.config;
@@ -247,15 +249,30 @@ std::vector<CounterResult> stop_and_read_counters(const std::vector<PerfHandle> 
         }
 
         PerfReadValues values{};
-        const ssize_t bytes_read = read(handle.fd, &values, sizeof(values));
-        if (bytes_read < 0)
+        uint8_t *buffer = reinterpret_cast<uint8_t *>(&values);
+        size_t total_read = 0;
+        while (total_read < sizeof(values))
         {
-            perror("read");
-            continue;
+            const ssize_t bytes_read = read(handle.fd, buffer + total_read, sizeof(values) - total_read);
+            if (bytes_read < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                perror("read");
+                break;
+            }
+            if (bytes_read == 0)
+            {
+                std::cerr << "Warning: unexpected EOF while reading counter for " << handle.label << std::endl;
+                break;
+            }
+            total_read += static_cast<size_t>(bytes_read);
         }
-        if (static_cast<size_t>(bytes_read) != sizeof(values))
+
+        if (total_read != sizeof(values))
         {
-            std::cerr << "Warning: unexpected perf read size for " << handle.label << std::endl;
             continue;
         }
 
@@ -331,6 +348,12 @@ int main(int argc, char *argv[])
     if (options.counters.empty())
     {
         options.counters.push_back({"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
+    }
+
+    if (!options.appCommand.empty() && options.targetPid != 0)
+    {
+        std::cerr << "Error: cannot combine -p/--pid with a command passed after --" << std::endl;
+        return 1;
     }
 
     pid_t child_pid = -1;

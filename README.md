@@ -14,7 +14,7 @@ spawned command with user-selected counters.
 
     ./perf_wrapper [-p PID] [-d SECONDS] [-c COUNTERS] [-- COMMAND ...]
 
-- -p monitor an existing process (default: wrapper PID).
+- -p monitor an existing process (default: wrapper PID). Cannot be combined with `-- COMMAND`.
 - -d stop after the given number of seconds; otherwise wait for the target.
 - -c comma-separated counters using sw-* / hw-* names (see -h for list).
 - -- terminate option parsing; everything after is executed under perf.
