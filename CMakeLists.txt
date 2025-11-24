@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 include(FetchContent)
+include(CTest)
+enable_testing()
 
 FetchContent_Declare(
 	CLI11
@@ -15,6 +17,14 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(CLI11)
 
+FetchContent_Declare(
+	doctest
+	GIT_REPOSITORY https://github.com/doctest/doctest.git
+	GIT_TAG v2.4.11
+)
+
+FetchContent_MakeAvailable(doctest)
+
 # Add the executable
 add_executable(perf_wrapper
 	src/main.cpp
@@ -22,3 +32,12 @@ add_executable(perf_wrapper
 	src/counters.cpp)
 
 target_link_libraries(perf_wrapper PRIVATE CLI11::CLI11)
+
+add_executable(perf_wrapper_tests
+	tests/perf_wrapper_integration_tests.cpp)
+
+target_link_libraries(perf_wrapper_tests PRIVATE doctest::doctest)
+target_compile_definitions(perf_wrapper_tests PRIVATE PERF_WRAPPER_BINARY="$<TARGET_FILE:perf_wrapper>")
+add_dependencies(perf_wrapper_tests perf_wrapper)
+
+add_test(NAME perf_wrapper_integration COMMAND perf_wrapper_tests)
