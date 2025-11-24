@@ -6,13 +6,11 @@
 #include <cctype>
 #include <sstream>
 
-namespace
-{
-struct CounterNameEntry
-{
-    const char *name;
-    uint32_t type;
-    uint64_t config;
+namespace {
+struct CounterNameEntry {
+  const char *name;
+  uint32_t type;
+  uint64_t config;
 };
 
 constexpr CounterNameEntry kSupportedCounters[] = {
@@ -39,71 +37,60 @@ constexpr CounterNameEntry kSupportedCounters[] = {
     {"hw-ref-cpu-cycles", PERF_TYPE_HARDWARE, PERF_COUNT_HW_REF_CPU_CYCLES},
 };
 
-std::string trim_copy(const std::string &value)
-{
-    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch); });
-    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) { return std::isspace(ch); }).base();
-    if (begin >= end)
-    {
-        return "";
-    }
-    return std::string(begin, end);
+std::string trim_copy(const std::string &value) {
+  const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) { return std::isspace(ch); });
+  const auto end =
+      std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) { return std::isspace(ch); }).base();
+  if (begin >= end) {
+    return "";
+  }
+  return std::string(begin, end);
 }
 
-std::string to_lower_copy(std::string value)
-{
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return value;
+std::string to_lower_copy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  return value;
 }
 
-std::string list_counters_by_type(uint32_t type)
-{
-    std::ostringstream oss;
-    bool first = true;
-    for (const auto &entry : kSupportedCounters)
-    {
-        if (entry.type != type)
-        {
-            continue;
-        }
-        if (!first)
-        {
-            oss << ", ";
-        }
-        oss << entry.name;
-        first = false;
+std::string list_counters_by_type(uint32_t type) {
+  std::ostringstream oss;
+  bool first = true;
+  for (const auto &entry : kSupportedCounters) {
+    if (entry.type != type) {
+      continue;
     }
-    if (first)
-    {
-        oss << "(none)";
+    if (!first) {
+      oss << ", ";
     }
-    return oss.str();
+    oss << entry.name;
+    first = false;
+  }
+  if (first) {
+    oss << "(none)";
+  }
+  return oss.str();
 }
 } // namespace
 
-bool add_counter_by_name(const std::string &name, std::vector<CounterConfig> &counters)
-{
-    const std::string normalized = to_lower_copy(trim_copy(name));
-    if (normalized.empty())
-    {
-        return false;
-    }
-
-    for (const auto &entry : kSupportedCounters)
-    {
-        if (normalized == entry.name)
-        {
-            counters.push_back({entry.name, entry.type, entry.config});
-            return true;
-        }
-    }
+bool add_counter_by_name(const std::string &name, std::vector<CounterConfig> &counters) {
+  const std::string normalized = to_lower_copy(trim_copy(name));
+  if (normalized.empty()) {
     return false;
+  }
+
+  for (const auto &entry : kSupportedCounters) {
+    if (normalized == entry.name) {
+      counters.push_back({entry.name, entry.type, entry.config});
+      return true;
+    }
+  }
+  return false;
 }
 
-std::string build_counter_help_footer()
-{
-    std::ostringstream oss;
-    oss << "\nSoftware counters: " << list_counters_by_type(PERF_TYPE_SOFTWARE)
-        << "\nHardware counters: " << list_counters_by_type(PERF_TYPE_HARDWARE);
-    return oss.str();
+std::string build_counter_help_footer() {
+  std::ostringstream oss;
+  oss << "\nSoftware counters: " << list_counters_by_type(PERF_TYPE_SOFTWARE)
+      << "\nHardware counters: " << list_counters_by_type(PERF_TYPE_HARDWARE);
+  return oss.str();
 }
