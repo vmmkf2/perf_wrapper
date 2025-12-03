@@ -1,20 +1,24 @@
 #include <CLI/CLI.hpp>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <linux/perf_event.h>
 #include <optional>
 #include <signal.h>
+#include <sstream>
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -26,34 +30,119 @@ struct MonitorOptions {
   int durationSeconds = 0;             // Optional duration for sampling existing processes
   bool hasDuration = false;            // Whether duration was explicitly provided
   std::vector<std::string> appCommand; // Command to spawn under measurement
-  std::vector<CounterConfig> counters = {{"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK}};
+  std::vector<CounterConfig> counters;
+  std::vector<std::vector<CounterConfig>> counterGroups;
 };
 
-bool configure_counters(const std::vector<std::string> &names, MonitorOptions &options) {
-  if (!names.empty()) {
-    std::vector<CounterConfig> configured;
-    configured.reserve(names.size());
+bool parse_counter_token(const std::string &token, std::string &name_out, bool &pinned_out) {
+  std::string value = token;
+  pinned_out = false;
 
-    for (const auto &name : names) {
-      if (!add_counter_by_name(name, configured)) {
-        std::cerr << "Error: unknown counter '" << name << "'" << std::endl;
-        return false;
-      }
+  const auto colon_pos = value.find(':');
+  if (colon_pos != std::string::npos) {
+    std::string suffix = value.substr(colon_pos + 1);
+    value = value.substr(0, colon_pos);
+
+    if (suffix == "P" || suffix == "p") {
+      pinned_out = true;
+    } else if (!suffix.empty()) {
+      std::cerr << "Error: unknown counter modifier '" << suffix << "' in token '" << token << "'" << std::endl;
+      return false;
     }
+  }
 
-    if (configured.empty()) {
-      std::cerr << "Error: no counters specified" << std::endl;
+  name_out = value;
+  return true;
+}
+
+bool build_counter_list(const std::vector<std::string> &names, std::vector<CounterConfig> &configured,
+                        bool enforce_pinned_leader) {
+  configured.clear();
+  if (names.empty()) {
+    std::cerr << "Error: no counters specified" << std::endl;
+    return false;
+  }
+
+  configured.reserve(names.size());
+  for (std::size_t index = 0; index < names.size(); ++index) {
+    std::string parsed_name;
+    bool pinned = false;
+    if (!parse_counter_token(names[index], parsed_name, pinned)) {
+      configured.clear();
       return false;
     }
 
-    options.counters = std::move(configured);
+    if (!add_counter_by_name(parsed_name, configured)) {
+      std::cerr << "Error: unknown counter '" << parsed_name << "'" << std::endl;
+      configured.clear();
+      return false;
+    }
+
+    if (pinned) {
+      if (enforce_pinned_leader && index != 0) {
+        std::cerr << "Error: pinned counters must be the first entry in a group" << std::endl;
+        configured.clear();
+        return false;
+      }
+      configured.back().pinned = true;
+    }
+  }
+
+  if (configured.empty()) {
+    std::cerr << "Error: no counters specified" << std::endl;
+    return false;
+  }
+
+  return true;
+}
+
+bool configure_counters(const std::vector<std::string> &names, MonitorOptions &options) {
+  if (names.empty()) {
     return true;
   }
 
-  if (options.counters.empty()) {
-    options.counters.push_back({"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
+  std::vector<CounterConfig> configured;
+  if (!build_counter_list(names, configured, false)) {
+    return false;
   }
 
+  options.counters = std::move(configured);
+  return true;
+}
+
+std::vector<std::string> split_counter_spec(const std::string &spec) {
+  std::vector<std::string> names;
+  std::string current;
+  for (char ch : spec) {
+    if (ch == ',') {
+      names.push_back(current);
+      current.clear();
+    } else {
+      current.push_back(ch);
+    }
+  }
+  names.push_back(current);
+
+  names.erase(std::remove_if(names.begin(), names.end(), [](const std::string &value) { return value.empty(); }),
+              names.end());
+
+  return names;
+}
+
+bool configure_counter_groups(const std::vector<std::string> &group_specs, MonitorOptions &options) {
+  for (const auto &spec : group_specs) {
+    const auto names = split_counter_spec(spec);
+    if (names.empty()) {
+      std::cerr << "Error: empty counter group specified" << std::endl;
+      return false;
+    }
+
+    std::vector<CounterConfig> group;
+    if (!build_counter_list(names, group, true)) {
+      return false;
+    }
+    options.counterGroups.push_back(std::move(group));
+  }
   return true;
 }
 
@@ -159,14 +248,17 @@ struct PerfHandle {
   perf_event_attr attr{};
   int fd = -1;
   std::string label;
+  int groupIndex = 0;
 
   PerfHandle() = default;
   PerfHandle(const PerfHandle &) = delete;
   PerfHandle &operator=(const PerfHandle &) = delete;
 
-  PerfHandle(PerfHandle &&other) noexcept : attr(other.attr), fd(other.fd), label(std::move(other.label)) {
+  PerfHandle(PerfHandle &&other) noexcept
+      : attr(other.attr), fd(other.fd), label(std::move(other.label)), groupIndex(other.groupIndex) {
     other.fd = -1;
     other.attr = perf_event_attr{};
+    other.groupIndex = 0;
   }
 
   PerfHandle &operator=(PerfHandle &&other) noexcept {
@@ -175,8 +267,10 @@ struct PerfHandle {
       attr = other.attr;
       fd = other.fd;
       label = std::move(other.label);
+      groupIndex = other.groupIndex;
       other.fd = -1;
       other.attr = perf_event_attr{};
+      other.groupIndex = 0;
     }
     return *this;
   }
@@ -198,13 +292,92 @@ struct CounterResult {
   uint64_t time_enabled = 0;
   uint64_t time_running = 0;
   uint64_t id = 0;
+  int group_index = 0;
 };
 
-std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const std::vector<CounterConfig> &counters) {
-  std::vector<PerfHandle> handles;
-  handles.reserve(counters.size());
+namespace {
+long double nanoseconds_to_seconds(uint64_t ns) { return static_cast<long double>(ns) / 1'000'000'000.0L; }
 
-  for (const CounterConfig &counter : counters) {
+std::string format_decimal(long double value, int precision) {
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(precision) << value;
+  return oss.str();
+}
+
+std::string format_rate_comment(long double rate, const std::string &label) {
+  if (rate <= 0.0L) {
+    return "";
+  }
+
+  if (label.find("cpu-cycles") != std::string::npos) {
+    return format_decimal(rate / 1'000'000'000.0L, 6) + " GHz";
+  }
+
+  struct RateUnit {
+    long double threshold;
+    long double divisor;
+    const char *suffix;
+  };
+
+  static constexpr RateUnit kUnits[] = {
+      {1'000'000'000.0L, 1'000'000'000.0L, "G/sec"},
+      {1'000'000.0L, 1'000'000.0L, "M/sec"},
+      {1'000.0L, 1'000.0L, "K/sec"},
+  };
+
+  for (const auto &unit : kUnits) {
+    if (rate >= unit.threshold) {
+      return format_decimal(rate / unit.divisor, 3) + ' ' + unit.suffix;
+    }
+  }
+
+  return format_decimal(rate, 3) + " /sec";
+}
+
+std::string build_comment(const CounterResult &result,
+                          const std::unordered_map<std::string, const CounterResult *> &lookup,
+                          long double fallback_seconds) {
+  if (result.label.find("branch-misses") != std::string::npos) {
+    auto it = lookup.find("hw-branch-instructions");
+    if (it != lookup.end() && it->second->value > 0) {
+      const long double miss_rate =
+          static_cast<long double>(result.value) / static_cast<long double>(it->second->value) * 100.0L;
+      return format_decimal(miss_rate, 6) + " miss rate";
+    }
+  }
+
+  const long double seconds = result.time_enabled > 0 ? nanoseconds_to_seconds(result.time_enabled) : fallback_seconds;
+  if (seconds <= 0.0L) {
+    return "";
+  }
+
+  const long double rate = static_cast<long double>(result.value) / seconds;
+  return format_rate_comment(rate, result.label);
+}
+
+std::string build_coverage_string(const CounterResult &result) {
+  long double percent = 0.0L;
+  if (result.time_enabled > 0) {
+    percent = static_cast<long double>(result.time_running) / static_cast<long double>(result.time_enabled) * 100.0L;
+  }
+
+  std::ostringstream oss;
+  oss << '(' << std::fixed << std::setprecision(2) << percent << "%)";
+  return oss.str();
+}
+} // namespace
+
+std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const MonitorOptions &options) {
+  std::vector<PerfHandle> handles;
+  const std::size_t estimated_total = options.counters.size();
+  std::size_t grouped_total = 0;
+  for (const auto &group : options.counterGroups) {
+    grouped_total += group.size();
+  }
+  handles.reserve(estimated_total + grouped_total);
+
+  const auto open_counter = [&](const CounterConfig &counter, int group_fd,
+                                int group_index) -> std::optional<PerfHandle> {
     PerfHandle handle;
     memset(&handle.attr, 0, sizeof(handle.attr));
     handle.attr.type = counter.type;
@@ -214,10 +387,12 @@ std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const
     handle.attr.exclude_kernel = 1;
     handle.attr.exclude_hv = 1;
     handle.attr.inherit = 1;
+    handle.attr.pinned = counter.pinned ? 1 : 0;
     handle.attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
     handle.label = counter.name;
+    handle.groupIndex = group_index;
 
-    const long fd = perf_event_open(&handle.attr, target_pid, -1, -1, 0);
+    const long fd = perf_event_open(&handle.attr, target_pid, -1, group_fd, 0);
     if (fd < std::numeric_limits<int>::min() || fd > std::numeric_limits<int>::max()) {
       std::cerr << "perf_event_open returned unexpected fd value for " << counter.name << std::endl;
       return std::nullopt;
@@ -227,8 +402,31 @@ std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const
       perror("perf_event_open");
       return std::nullopt;
     }
+    return handle;
+  };
 
-    handles.push_back(std::move(handle));
+  for (const CounterConfig &counter : options.counters) {
+    auto handle = open_counter(counter, -1, 0);
+    if (!handle) {
+      return std::nullopt;
+    }
+    handles.push_back(std::move(*handle));
+  }
+
+  int next_group_index = 1;
+  for (const auto &group : options.counterGroups) {
+    const int current_group_index = next_group_index++;
+    int leader_fd = -1;
+    for (const CounterConfig &counter : group) {
+      auto handle = open_counter(counter, leader_fd, current_group_index);
+      if (!handle) {
+        return std::nullopt;
+      }
+      if (leader_fd == -1) {
+        leader_fd = handle->fd;
+      }
+      handles.push_back(std::move(*handle));
+    }
   }
 
   return handles;
@@ -300,7 +498,8 @@ std::vector<CounterResult> stop_and_read_counters(const std::vector<PerfHandle> 
       adjusted_value = static_cast<long long>(static_cast<long double>(values.value) * scale);
     }
 
-    results.push_back({handle.label, adjusted_value, values.time_enabled, values.time_running, values.id});
+    results.push_back(
+        {handle.label, adjusted_value, values.time_enabled, values.time_running, values.id, handle.groupIndex});
   }
 
   return results;
@@ -309,6 +508,7 @@ std::vector<CounterResult> stop_and_read_counters(const std::vector<PerfHandle> 
 int main(int argc, char *argv[]) {
   MonitorOptions options;
   std::vector<std::string> counter_names;
+  std::vector<std::string> counter_group_specs;
 
   CLI::App cli_app{"Minimal wrapper around perf_event_open"};
   cli_app.footer(build_counter_help_footer());
@@ -324,6 +524,9 @@ int main(int argc, char *argv[]) {
   counters_option->delimiter(',');
   counters_option->expected(-1);
 
+  cli_app.add_option("-g,--group", counter_group_specs,
+                     "Counter group (comma-separated). May be repeated for multiple groups");
+
   CLI11_PARSE(cli_app, argc, argv);
 
   options.appCommand = cli_app.remaining();
@@ -332,6 +535,14 @@ int main(int argc, char *argv[]) {
 
   if (!configure_counters(counter_names, options)) {
     return 1;
+  }
+
+  if (!configure_counter_groups(counter_group_specs, options)) {
+    return 1;
+  }
+
+  if (options.counters.empty() && options.counterGroups.empty()) {
+    options.counters.push_back({"sw-cpu-clock", PERF_TYPE_SOFTWARE, PERF_COUNT_SW_CPU_CLOCK});
   }
 
   if (!options.appCommand.empty() && options.targetPid != 0) {
@@ -360,7 +571,7 @@ int main(int argc, char *argv[]) {
   const pid_t effective_pid = options.targetPid == 0 ? getpid() : options.targetPid;
   print_process_info(effective_pid);
 
-  auto perf_handles = setup_perf_events(effective_pid, options.counters);
+  auto perf_handles = setup_perf_events(effective_pid, options);
   if (!perf_handles) {
     if (child_pid > 0) {
       terminate_child_process(child_pid);
@@ -413,13 +624,86 @@ int main(int argc, char *argv[]) {
 
   const auto counter_results = stop_and_read_counters(handles);
 
-  std::cout << "\n=== Counter Results ===" << std::endl;
+  if (counter_results.empty()) {
+    std::cout << "\nNo counter data collected." << std::endl;
+    return 0;
+  }
+
+  std::unordered_map<std::string, const CounterResult *> lookup;
   for (const auto &result : counter_results) {
-    std::cout << result.label << ": " << format_with_commas(result.value);
-    if (result.time_running > 0 && result.time_running != result.time_enabled) {
-      std::cout << " (enabled=" << result.time_enabled << ", running=" << result.time_running << ")";
+    lookup[result.label] = &result;
+  }
+
+  uint64_t max_time_enabled = 0;
+  for (const auto &result : counter_results) {
+    max_time_enabled = std::max(max_time_enabled, result.time_enabled);
+  }
+  if (max_time_enabled == 0 && options.hasDuration && options.durationSeconds > 0) {
+    max_time_enabled = static_cast<uint64_t>(options.durationSeconds) * 1'000'000'000ULL;
+  }
+
+  const long double total_ms = static_cast<long double>(max_time_enabled) / 1'000'000.0L;
+  const long double fallback_seconds = nanoseconds_to_seconds(max_time_enabled);
+
+  struct DisplayRow {
+    const CounterResult *result = nullptr;
+    std::string group_text;
+    std::string count_text;
+    std::string comment;
+    std::string coverage;
+  };
+
+  std::vector<DisplayRow> rows;
+  rows.reserve(counter_results.size());
+  for (const auto &result : counter_results) {
+    DisplayRow row;
+    row.result = &result;
+    row.group_text = result.group_index > 0 ? std::to_string(result.group_index) : "-";
+    row.count_text = format_with_commas(result.value);
+    row.comment = build_comment(result, lookup, fallback_seconds);
+    if (row.comment.empty()) {
+      row.comment = "-";
     }
-    std::cout << std::endl;
+    row.coverage = build_coverage_string(result);
+    rows.push_back(std::move(row));
+  }
+
+  size_t count_width = std::string("count").size();
+  size_t name_width = std::string("name").size();
+  size_t comment_width = std::string("comment").size();
+  size_t coverage_width = std::string("coverage").size();
+  size_t group_width = std::string("group").size();
+
+  for (const auto &row : rows) {
+    count_width = std::max(count_width, row.count_text.size());
+    name_width = std::max(name_width, row.result->label.size());
+    comment_width = std::max(comment_width, row.comment.size());
+    coverage_width = std::max(coverage_width, row.coverage.size());
+    group_width = std::max(group_width, row.group_text.size());
+  }
+
+  count_width += 4; // indent similar to perf output
+  name_width += 2;
+  comment_width += 2;
+  group_width += 2;
+
+  const std::string summary_label = options.hasDuration ? "Timeout exit" : "Measurement summary";
+  std::ostringstream total_ms_stream;
+  total_ms_stream << std::fixed << std::setprecision(0) << total_ms;
+  std::cout << "\n" << summary_label << " (total " << total_ms_stream.str() << " ms)" << std::endl;
+
+  std::cout << std::right << std::setw(static_cast<int>(count_width)) << "count" << "  " << std::left
+            << std::setw(static_cast<int>(name_width)) << "name"
+            << "| " << std::left << std::setw(static_cast<int>(comment_width)) << "comment"
+            << "| " << std::left << std::setw(static_cast<int>(coverage_width)) << "coverage"
+            << " | " << std::left << std::setw(static_cast<int>(group_width)) << "group" << std::endl;
+
+  for (const auto &row : rows) {
+    std::cout << std::right << std::setw(static_cast<int>(count_width)) << row.count_text << "  " << std::left
+              << std::setw(static_cast<int>(name_width)) << row.result->label << "| " << std::left
+              << std::setw(static_cast<int>(comment_width)) << row.comment << "| " << std::left
+              << std::setw(static_cast<int>(coverage_width)) << row.coverage << " | " << std::left
+              << std::setw(static_cast<int>(group_width)) << row.group_text << std::endl;
   }
   return 0;
 }
