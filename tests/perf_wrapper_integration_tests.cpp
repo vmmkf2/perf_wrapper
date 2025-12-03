@@ -192,7 +192,7 @@ TEST_CASE("supports pinned group leaders") {
   CHECK(result.output.find("| 1 ") != std::string::npos);
 }
 
-TEST_CASE("rejects pinned counters that are not leaders") {
+TEST_CASE("allows pinned counter specified later to become leader") {
   const std::string command =
       std::string(PERF_WRAPPER_BINARY) + " -d 1 -g sw-task-clock,sw-cpu-clock:P -- /bin/true";
 
@@ -203,6 +203,38 @@ TEST_CASE("rejects pinned counters that are not leaders") {
     return;
   }
 
+  CHECK_EQ(result.exit_code, 0);
+  CHECK(result.output.find("sw-cpu-clock") != std::string::npos);
+  CHECK(result.output.find("| 1 ") != std::string::npos);
+}
+
+TEST_CASE("supports explicit leader modifier") {
+  const std::string command =
+      std::string(PERF_WRAPPER_BINARY) + " -d 1 -g sw-task-clock:L,sw-cpu-clock -- /bin/true";
+
+  const auto result = run_command(command);
+
+  if (should_skip_due_to_permissions(result)) {
+    WARN("perf_event_open not permitted in this environment - skipping test");
+    return;
+  }
+
+  CHECK_EQ(result.exit_code, 0);
+  CHECK(result.output.find("sw-task-clock") != std::string::npos);
+  CHECK(result.output.find("| 1 ") != std::string::npos);
+}
+
+TEST_CASE("rejects multiple explicit leaders") {
+  const std::string command =
+      std::string(PERF_WRAPPER_BINARY) + " -d 1 -g sw-task-clock:L,sw-cpu-clock:L -- /bin/true";
+
+  const auto result = run_command(command);
+
+  if (should_skip_due_to_permissions(result)) {
+    WARN("perf_event_open not permitted in this environment - skipping test");
+    return;
+  }
+
   CHECK_NE(result.exit_code, 0);
-  CHECK(result.output.find("pinned counters must be the first entry in a group") != std::string::npos);
+  CHECK(result.output.find("multiple explicit leaders") != std::string::npos);
 }

@@ -146,6 +146,20 @@ bool configure_counter_groups(const std::vector<std::string> &group_specs, Monit
   return true;
 }
 
+void debug_print_perf_attr(const perf_event_attr &attr, const std::string &label) {
+  std::cout << "perf_event_attr for " << label << ":" << std::endl;
+  std::cout << "  type=" << attr.type << " size=" << attr.size << " config=0x" << std::hex << attr.config
+            << std::dec << std::endl;
+  std::cout << "  sample_type=0x" << std::hex << attr.sample_type << std::dec
+            << " read_format=0x" << std::hex << attr.read_format << std::dec << std::endl;
+  std::cout << "  disabled=" << static_cast<int>(attr.disabled) << " inherit=" << static_cast<int>(attr.inherit)
+            << " pinned=" << static_cast<int>(attr.pinned) << std::endl;
+  std::cout << "  exclude_user=" << static_cast<int>(attr.exclude_user)
+            << " exclude_kernel=" << static_cast<int>(attr.exclude_kernel)
+            << " exclude_hv=" << static_cast<int>(attr.exclude_hv) << std::endl;
+  std::cout << "  wakeup_events=" << attr.wakeup_events << " bp_type=" << attr.bp_type << std::endl;
+}
+
 static long perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) {
   // debug print of syscall parametrs
   std::cout << "perf_event_open called with pid=" << pid << ", cpu=" << cpu << ", group_fd=" << group_fd
@@ -391,6 +405,8 @@ std::optional<std::vector<PerfHandle>> setup_perf_events(pid_t target_pid, const
     handle.attr.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
     handle.label = counter.name;
     handle.groupIndex = group_index;
+
+    debug_print_perf_attr(handle.attr, counter.name);
 
     const long fd = perf_event_open(&handle.attr, target_pid, -1, group_fd, 0);
     if (fd < std::numeric_limits<int>::min() || fd > std::numeric_limits<int>::max()) {
